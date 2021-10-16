@@ -4,21 +4,22 @@
 
 /******* Hooks *******/
 
-/* See https://syscalls64.paolostivanin.com/ for information about passed arguments via registers */
+/* См. https://syscalls64.paolostivanin.com/ для получения информации о переданных аргументах через регистры. */
 typedef asmlinkage long (*syscall_t)(const struct pt_regs *);
 
 /******* Helpers *******/
 
-/* Bit 16 in the cr0 register is the W(rite) P(rotection) bit, which
- * determines whether read-only pages can be written to. */
+/* 16ый бит в регистре cr0 - это бит W(rite) P(rotection), 
+ * который определяет, можно ли писать в read-only страницы. */
 #define CR0_WP 0x00010000
 
-/* The built in linux write_cr0() function stops us from modifying
- * the WP bit, so we write our own instead */
+/* Встроенная в linux функция write_cr0() не позволяет изменять бит WP,
+ * поэтому реализуем свою функцию */
 extern unsigned long __force_order;
 inline void cr0_write(unsigned long cr0)
 {
-    asm volatile("mov %0,%%cr0" : "+r"(cr0), "+m"(__force_order));
+    // mov cr0, rax
+    asm volatile("mov %0, %%cr0" : "+r"(cr0), "+m"(__force_order));
 }
 
 static inline void protect_memory(void)

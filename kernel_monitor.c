@@ -12,7 +12,7 @@ MODULE_AUTHOR("Kozlov M.A.");
 MODULE_DESCRIPTION("Kernel monitoring");
 MODULE_VERSION("0.1");
 
-// address of sys call table
+/* Адрес таблицы системных вызовов */
 static unsigned long * __sys_call_table;
 
 #define KERNEL_MONITOR "[KERNEL_MONITOR]: "
@@ -70,7 +70,7 @@ static int __init kernel_monitor_init(void)
     unprotect_memory();
 
     __sys_call_table[__NR_mkdir] = (unsigned long)hook_mkdir;
-
+    
     protect_memory();
 
     return 0;
@@ -81,8 +81,13 @@ static void __exit kernel_monitor_exit(void)
     printk(KERN_INFO KERNEL_MONITOR "Restoring syscalls\n");
     unprotect_memory();
     
-    __sys_call_table[__NR_mkdir] = (unsigned long)orig_mkdir;
+    __sys_call_table[__NR_mkdir]    = (unsigned long)orig_mkdir;
     
+    __sys_call_table[__NR_open]     = (unsigned long)orig_open;
+    __sys_call_table[__NR_close]    = (unsigned long)orig_close;
+    __sys_call_table[__NR_read]     = (unsigned long)orig_read;
+    __sys_call_table[__NR_write]    = (unsigned long)orig_write;
+
     protect_memory();
     
     printk(KERN_INFO KERNEL_MONITOR "Unloaded.\n");
