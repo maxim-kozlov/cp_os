@@ -33,11 +33,28 @@ asmlinkage int hook_mkdir(const struct pt_regs *regs)
         printk(KERN_INFO KERNEL_MONITOR "Trying to create directory with name: %s\n", dir_name);
 
     /* Pass the pt_regs struct along to the original sys_mkdir syscall */
-    orig_mkdir(regs);
-    return 0;
+    error = orig_mkdir(regs);
+    return error;
 }
 
 syscall_t orig_open;
+asmlinkage int hook_open(const struct pt_regs *regs)
+{
+    const char __user *filename = (char *)regs->di;
+    int flags = (int)regs->si;
+    umode_t mode = (umode_t)regs->dx;
+
+    char kernel_filename[NAME_MAX] = {0};
+
+    long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
+
+    int fd = orig_open(regs);
+        
+    if (error > 0)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; open: %s, flags: %x; mode: %x; fd: \n", current->pid, kernel_filename, flags, mode, fd);
+
+    return fd;
+}
 syscall_t orig_close;
 syscall_t orig_read;
 syscall_t orig_write;
@@ -70,7 +87,8 @@ static int __init kernel_monitor_init(void)
     unprotect_memory();
 
     __sys_call_table[__NR_mkdir] = (unsigned long)hook_mkdir;
-    
+    __sys_call_table[__NR_open] = (unsigned long)hook_open;
+
     protect_memory();
 
     return 0;
