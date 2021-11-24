@@ -15,6 +15,17 @@
 #include <linux/path.h>
 #include <linux/dcache.h>
 
+/*
+ * open.c
+ */
+struct open_flags {
+	int open_flag;
+	umode_t mode;
+	int acc_mode;
+	int intent;
+	int lookup_flags;
+};
+
 #include "syscall_hooks.h"
 #include "ftrace_helper.h"
 
@@ -120,11 +131,10 @@ int bdev_write_page(struct block_device *bdev, sector_t sector, struct page *pag
 static ssize_t random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 */
 
-static asmlinkage int (*orig_do_sys_open)(int dfd, const char __user *filename, int flags, umode_t mode);
-static asmlinkage int hook_do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
+static asmlinkage struct file* (*orig_do_filp_open)(int dfd, struct filename *pathname, const struct open_flags *op);
+static asmlinkage struct file* hook_do_filp_open(int dfd, struct filename *pathname, const struct open_flags *op)
 {
-    if (current->real_parent->pid > 3)
-        printk(KERN_INFO KERNEL_MONITOR "H Process %d; open\n", current->pid);
+    printk(KERN_INFO KERNEL_MONITOR "H Process %d; open %s\n", current->pid, pathname->name);
     // const char __user *filename = (char *)regs->di;
     // int flags = (int)regs->si;
     // umode_t mode = (umode_t)regs->dx;
@@ -133,11 +143,12 @@ static asmlinkage int hook_do_sys_open(int dfd, const char __user *filename, int
 
     // long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
 
-    int fd = orig_do_sys_open(dfd, filename, flags, mode);
+    struct file* file;
+    file = orig_do_filp_open(dfd, pathname, op);
 
     // if (current->real_parent->pid > 3)
     //      printk(KERN_INFO KERNEL_MONITOR "H Process %d; open: , flags: %x; mode: %x; fd: %d\n", current->pid, flags, mode, fd);
-    return fd;
+    return file;
 }
 
 static asmlinkage int (*orig_bdev_read_page)(struct block_device *bdev, sector_t sector, struct page *page);
@@ -206,7 +217,7 @@ static struct ftrace_hook hooks[] =
     HOOK("urandom_read", hook_urandom_read, &orig_urandom_read),
     HOOK("bdev_read_page", hook_bdev_read_page, &orig_bdev_read_page),
     HOOK("bdev_write_page", hook_bdev_write_page, &orig_bdev_write_page),
-    HOOK("do_sys_open", hook_do_sys_open, &orig_do_sys_open)
+    HOOK("do_filp_open", hook_do_filp_open, &orig_do_filp_open)
 };
 
 /* Функция инициализации модуля */
