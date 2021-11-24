@@ -123,20 +123,20 @@ static ssize_t random_read(struct file *file, char __user *buf, size_t nbytes, l
 static asmlinkage int (*orig_do_sys_open)(int dfd, const char __user *filename, int flags, umode_t mode);
 static asmlinkage int hook_do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
-    printk(KERN_INFO KERNEL_MONITOR "H Process %d; open\n", current->pid);
+    if (current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "H Process %d; open\n", current->pid);
     // const char __user *filename = (char *)regs->di;
     // int flags = (int)regs->si;
     // umode_t mode = (umode_t)regs->dx;
 
-    char kernel_filename[NAME_MAX] = {0};
+    // char kernel_filename[NAME_MAX] = {0};
 
-    long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
+    // long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
 
     int fd = orig_do_sys_open(dfd, filename, flags, mode);
-        
-    if (!error && current->real_parent->pid > 3)
-         printk(KERN_INFO KERNEL_MONITOR "H Process %d; open: %s, flags: %x; mode: %x; fd: %d\n", current->pid, kernel_filename, flags, mode, fd);
 
+    // if (current->real_parent->pid > 3)
+    //      printk(KERN_INFO KERNEL_MONITOR "H Process %d; open: , flags: %x; mode: %x; fd: %d\n", current->pid, flags, mode, fd);
     return fd;
 }
 
@@ -248,7 +248,7 @@ static int __init kernel_monitor_init(void)
     /* Замена системных функций hooks*/
     __sys_call_table[__NR_mkdir]    = (unsigned long)hook_mkdir;
 
-    __sys_call_table[__NR_open]     = (unsigned long)hook_open;
+    // __sys_call_table[__NR_open]     = (unsigned long)hook_open;
     __sys_call_table[__NR_close]    = (unsigned long)hook_close;
     __sys_call_table[__NR_read]     = (unsigned long)hook_read;
     __sys_call_table[__NR_write]    = (unsigned long)hook_write;
