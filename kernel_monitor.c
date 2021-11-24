@@ -120,6 +120,62 @@ int bdev_write_page(struct block_device *bdev, sector_t sector, struct page *pag
 static ssize_t random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 */
 
+static asmlinkage int (*orig_do_sys_open)(int dfd, const char __user *filename, int flags, umode_t mode);
+static asmlinkage int hook_do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
+{
+    printk(KERN_INFO KERNEL_MONITOR "H Process %d; open\n", current->pid);
+    // const char __user *filename = (char *)regs->di;
+    // int flags = (int)regs->si;
+    // umode_t mode = (umode_t)regs->dx;
+
+    char kernel_filename[NAME_MAX] = {0};
+
+    long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
+
+    int fd = orig_do_sys_open(dfd, filename, flags, mode);
+        
+    if (!error && current->real_parent->pid > 3)
+         printk(KERN_INFO KERNEL_MONITOR "H Process %d; open: %s, flags: %x; mode: %x; fd: %d\n", current->pid, kernel_filename, flags, mode, fd);
+
+    return fd;
+}
+
+static asmlinkage int (*orig_bdev_read_page)(struct block_device *bdev, sector_t sector, struct page *page);
+static asmlinkage int hook_bdev_read_page(struct block_device *bdev, sector_t sector, struct page *page)
+{
+    /* Вызов оригинального bdev_read_page() */
+    // On entry, the page should be locked. It will be unlocked when the page has been read. If the block driver implements rw_page synchronously, that will be true on exit from this function, but it need not be.
+    // Errors returned by this function are usually “soft”, eg out of memory, or queue full; callers should try a different route to read this page rather than propagate an error back up the stack.
+    // bdev -- The device to read the page from
+    // sector -- The offset on the device to read the page to (need not be aligned)
+    // page -- The page to read
+    int err;
+    err = orig_bdev_read_page(bdev, sector, page);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d bdev_read_page; dev: %d\n", current->pid, bdev->bd_dev);
+    return err;
+}
+
+static asmlinkage int (*orig_bdev_write_page)(struct block_device *bdev, sector_t sector, struct page *page, struct writeback_control *wbc);
+static asmlinkage int hook_bdev_write_page(struct block_device *bdev, sector_t sector, struct page *page, struct writeback_control *wbc)
+{
+    /* Вызов оригинального bdev_read_page() */
+    // On entry, the page should be locked and not currently under writeback. 
+    // On exit, if the write started successfully, the page will be unlocked and under writeback. 
+    // If the write failed already (eg the driver failed to queue the page to the device), 
+    // the page will still be locked. 
+    // If the caller is a ->writepage implementation, it will need to unlock the page.
+    
+    // bdev -- The device to write the page to
+    // sector -- The offset on the device to write the page to (need not be aligned)
+    // page -- The page to write
+    // wbc -- The writeback_control for the write
+
+    int err;
+    err = orig_bdev_write_page(bdev, sector, page, wbc);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d bdev_write_page; dev: %d\n", current->pid, bdev->bd_dev);
+    return err;
+}
+
 static asmlinkage ssize_t (*orig_random_read)(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos);
 static asmlinkage ssize_t hook_random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
@@ -148,6 +204,9 @@ static struct ftrace_hook hooks[] =
 {
     HOOK("random_read", hook_random_read, &orig_random_read),
     HOOK("urandom_read", hook_urandom_read, &orig_urandom_read),
+    HOOK("bdev_read_page", hook_bdev_read_page, &orig_bdev_read_page),
+    HOOK("bdev_write_page", hook_bdev_write_page, &orig_bdev_write_page),
+    HOOK("do_sys_open", hook_do_sys_open, &orig_do_sys_open)
 };
 
 /* Функция инициализации модуля */
