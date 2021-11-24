@@ -134,7 +134,8 @@ static ssize_t random_read(struct file *file, char __user *buf, size_t nbytes, l
 static asmlinkage struct file* (*orig_do_filp_open)(int dfd, struct filename *pathname, const struct open_flags *op);
 static asmlinkage struct file* hook_do_filp_open(int dfd, struct filename *pathname, const struct open_flags *op)
 {
-    printk(KERN_INFO KERNEL_MONITOR "H Process %d; open %s\n", current->pid, pathname->name);
+    if (current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; open %s;\n", current->pid, pathname->name);
     // const char __user *filename = (char *)regs->di;
     // int flags = (int)regs->si;
     // umode_t mode = (umode_t)regs->dx;
