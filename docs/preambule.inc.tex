@@ -1,0 +1,81 @@
+% Настройки стиля ГОСТ 7-32
+% Для начала определяем, хотим мы или нет, чтобы рисунки и таблицы нумеровались в пределах раздела, или нам нужна сквозная нумерация.
+\EqInChapter % формулы будут нумероваться в пределах раздела
+\TableInChapter % таблицы будут нумероваться в пределах раздела
+\PicInChapter % рисунки будут нумероваться в пределах раздела
+\usepackage{slashbox}
+
+\usepackage[table,xcdraw]{xcolor}
+
+% Добавляем гипертекстовое оглавление в PDF
+\usepackage[
+bookmarks=true, colorlinks=true, unicode=true,
+urlcolor=black,linkcolor=black, anchorcolor=black,
+citecolor=black, menucolor=black, filecolor=black,
+]{hyperref}
+
+% Изменение начертания шрифта --- после чего выглядит таймсоподобно.
+% \usepackage{cyrtimespatched}
+
+% графика
+\usepackage{graphicx}
+\graphicspath{ {./img/} }
+
+% отделять первую строку раздела абзацным отступом
+\usepackage{indentfirst} 
+
+% Пакет Tikz
+\usepackage{tikz}
+\usetikzlibrary{arrows,positioning,shadows}
+
+% Произвольная нумерация списков.
+\usepackage{enumerate}
+
+% ячейки в несколько строчек
+\usepackage{multirow}
+
+% itemize внутри tabular
+\usepackage{paralist,array}
+
+% объявляем новую команду для переноса строки внутри ячейки таблицы
+\newcommand{\specialcell}[2][c]{%
+	\begin{tabular}[#1]{@{}c@{}}#2\end{tabular}}
+
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{pdfpages}
+\usepackage{caption}
+
+% \usepackage{extsizes} % Для добавления в параметры класса документа 14pt
+
+% Для работы с несколькими языками и шрифтом Times New Roman по-умолчанию
+\usepackage[english,russian]{babel}
+% \usepackage{fontspec}
+% \setmainfont{Times New Roman}
+
+\usepackage{ulem} % Нормальное нижнее подчеркивание
+\usepackage{hhline} % Двойная горизонтальная линия в таблицах
+\usepackage[figure,table]{totalcount} % Подсчет изображений, таблиц
+\usepackage{rotating} % Поворот изображения вместе с названием
+\usepackage{lastpage} % Для подсчета числа страниц
+
+% \captionsetup[table]{position=top}
+
+% Дополнительное окружения для подписей
+\usepackage{array}
+\newenvironment{signstabular}[1][1]{
+	\renewcommand*{\arraystretch}{#1}
+	\tabular
+}{
+	\endtabular
+}
+
+% \usepackage[cache=false, newfloat]{minted}
+
+%  Подсчёт числа цитирования
+% необходимо скачать и установить (см. readme) https://ctan.org/pkg/totcount
+\usepackage{totcount}
+\newtotcounter{citnum} %From the package documentation
+\def\oldbibitem{} \let\oldbibitem=\bibitem
+\def\bibitem{\stepcounter{citnum}\oldbibitem}
+

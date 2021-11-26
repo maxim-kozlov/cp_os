@@ -1,0 +1,37 @@
+\documentclass[utf8x, 12pt]{G7-32}
+
+\include{preambule.inc}
+\include{listings.inc}
+
+% ---------------------- Документ ----------------------
+\begin{document}
+
+	\frontmatter % выключает нумерацию ВСЕГО; здесь начинаются ненумерованные главы: реферат, введение, глоссарий, сокращения и прочее.
+
+	\include{00-title}
+
+	\includepdf{TZ_Kozlov.pdf}
+
+	\renewcommand{\contentsname}{\normalsize\bfseries\centering СОДЕРЖАНИЕ}
+	\small
+	\tableofcontents
+	\normalsize
+
+	\pagebreak
+	
+	\include{03-intro}
+
+	\mainmatter % это включает нумерацию глав и секций в документе ниже
+
+	\include{10-analysis}
+	\include{20-design}
+	\include{30-technology}
+	\include{40-research}
+
+	\backmatter % Здесь заканчивается нумерованная часть документа и начинаются ссылки и
+	\include{50-conclusion}
+	\include{60-bibliography}
+
+	% \appendix % Тут идут приложения
+	% \include{70-application}
+\end{document}
