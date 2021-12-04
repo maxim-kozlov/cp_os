@@ -3,20 +3,49 @@
     алгоритм перехвата функций с помошью системной таблицы и ftrace.
 
 \section{Общая архитектура приложения}
+    В состав программного обеспечения входит один загружаемый модуль ядра, 
+    который следит за вызовом определенных функций, 
+    с последующим логированием информации 
+    об аргументах и имени вызываемой функции.
 
 \section{Перехват функций}
-
+    TODO
     \subsection{Перехват функций через системную таблицу}
         описание, код, алгоритм
-
+        \begin{lstlisting}[language=C, label=lst:syscall-hooking:signature, caption=Сигнатура обработчиков системных вызовов]
+typedef asmlinkage long ( *syscall_t)(const struct pt_regs *);
+        \end{lstlisting}
+    
     \subsection{Перехват функций через ftrace}
         описание, код, алгоритм
 
+    
+        \begin{lstlisting}[language=C, label=lst:ftrace-hooking:struct, caption=Структура перехватываемой функции]
+struct ftrace_hook {
+    const char *name; // имя перехватываемой функции
+    void *function;   // адрес функции-обертки
+    void *original;   // адрес оригинальной функции
+
+    struct ftrace_ops ops;
+};
+        \end{lstlisting}
+
+        \begin{lstlisting}[language=C, label=lst:ftrace-hooking:struct, caption=Макрос для заполнения структуры перехватываемой функции]
+#define HOOK(_name, _hook, _orig)   \
+{                            \
+    .name = (_name),         \
+    .function = (_hook),     \
+    .original = (_orig),     \
+}
+        \end{lstlisting}
+
 \section{Связь структур}
     Получение по файловому дескриптору имени файла.
+    % current->files->fdt->fd[fd]->f_path.dentry->d_iname
 
 \section{Вывод}
-    В данном разделе была рассмотрена общая архитектура приложения, алгоритм перехвата функций и 
+    В данном разделе была рассмотрена общая архитектура приложения, 
+    алгоритмы перехвата функций и 
     способ получения имени файла по файловому дескриптору.
 
 \pagebreak
