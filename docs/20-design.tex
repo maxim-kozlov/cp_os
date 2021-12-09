@@ -1,6 +1,6 @@
 \chapter{Конструкторская часть}
     В данном разделе будет рассмотрена общая архитектура приложения и 
-    алгоритм перехвата функций с помошью системной таблицы и ftrace.
+    методы перехвата функций с помощью системной таблицы и ftrace.
 
 \section{Общая архитектура приложения}
     В состав программного обеспечения входит один загружаемый модуль ядра, 
@@ -9,16 +9,159 @@
     об аргументах и имени вызываемой функции.
 
 \section{Перехват функций}
-    TODO
     \subsection{Перехват функций через системную таблицу}
-        описание, код, алгоритм
-        \begin{lstlisting}[language=C, label=lst:syscall-hooking:signature, caption=Сигнатура обработчиков системных вызовов]
-typedef asmlinkage long ( *syscall_t)(const struct pt_regs *);
-        \end{lstlisting}
-    
-    \subsection{Перехват функций через ftrace}
-        описание, код, алгоритм
+        Общий алгоритм установки перехвата функции через системную таблицу 
+        состоит из следующих этапов:
+        \begin{enumerate}
+            \item поиск адреса системной таблицы;
+            \item сохранение адресов оригинальных обработчиков системных вызовов;
+            \item снятие защиты от модификации таблицы;
+            \item модификация таблицы;
+            \item восстановление защиты от записи.
+        \end{enumerate}
+        
+        Рассмотрим каждый из этапов.
 
+        Адрес системной таблицы можно найти с помощью функции kallsyms\_lookup\_name.
+        Данная функция позволяет найти абсолютный адрес любого экспортируемого символа ядра.
+        На листинге \ref{lst:syscall-hooking:kallsyms_lookup_name} приведён
+        код поиска начального адреса таблицы системных вызовов.
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:kallsyms_lookup_name, caption=Поиск начального адреса таблицы системных вызовов]
+/* Адрес таблицы системных вызовов */
+static unsigned long * __sys_call_table;
+
+/* Поиск начального адреса таблицы системных вызовов */
+__sys_call_table = kallsyms_lookup_name("sys_call_table");
+    \end{lstlisting}
+
+        Таблица системных вызовов находиться в области памяти доступной только на чтение,
+        поэтому на время изменения требуется отключить глобальную защиту страниц от записи,
+        изменением флага WP (Write Protection) в регистре CR0.
+        Данные функции представлены в листинге \ref{lst:syscall-hooking:memory}.
+        Однако встроенная в Linux функция write\_cr0() не позволяет изменять бит WP, 
+        поэтому требуется своя функция, представленная в листинге \ref{lst:syscall-hooking:cr0_write}.
+    
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:memory, caption=Функции включение и отключение защиты от записи страницы]
+#define CR0_WP 0x00010000
+static inline void protect_memory(void)
+{
+    unsigned long cr0 = read_cr0();
+    cr0_write(cr0 | CR0_WP);
+}
+
+static inline void unprotect_memory(void)
+{
+    unsigned long cr0 = read_cr0();
+    cr0_write(cr0 & ~CR0_WP);
+}
+    \end{lstlisting}
+    
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:cr0_write, caption=Функция изменения значения регистра cr0]
+extern unsigned long __force_order;
+inline void cr0_write(unsigned long cr0)
+{
+    // mov cr0, rax
+    asm volatile("mov %0, %%cr0" : "+r"(cr0), "+m"(__force_order));
+}
+    \end{lstlisting}
+    
+    В новых версиях ядра сигнатура обработчика системного вызова описывается следующим образом (листинг \ref{lst:syscall-hooking:signature}):
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:signature, caption=Сигнатура обработчиков системных вызовов]
+typedef asmlinkage long ( *syscall_t)(const struct pt_regs *);
+    \end{lstlisting}
+    где struct pt\_regs может отличаться для разных версий ядра и процессоров.
+    Одно из определений представлено в листинге \ref{lst:syscall-hooking:pt_regs} \cite{linux-pt_regs}.
+
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:pt_regs, caption=Структура регистров]
+struct pt_regs {
+    /*
+        * NB: 32-bit x86 CPUs are inconsistent as what happens in the
+        * following cases (where %seg represents a segment register):
+        *
+        * - pushl %seg: some do a 16-bit write and leave the high
+        *   bits alone
+        * - movl %seg, [mem]: some do a 16-bit write despite the movl
+        * - IDT entry: some (e.g. 486) will leave the high bits of CS
+        *   and (if applicable) SS undefined.
+        *
+        * Fortunately, x86-32 doesn't read the high bits on POP or IRET,
+        * so we can just treat all of the segment registers as 16-bit
+        * values.
+        */
+    unsigned long bx;
+    unsigned long cx;
+    unsigned long dx;
+    unsigned long si;
+    unsigned long di;
+    unsigned long bp;
+    unsigned long ax;
+    unsigned short ds;
+    unsigned short __dsh;
+    unsigned short es;
+    unsigned short __esh;
+    unsigned short fs;
+    unsigned short __fsh;
+    /* On interrupt, gs and __gsh store the vector number. */
+    unsigned short gs;
+    unsigned short __gsh;
+    /* On interrupt, this is the error code. */
+    unsigned long orig_ax;
+    unsigned long ip;
+    unsigned short cs;
+    unsigned short __csh;
+    unsigned long flags;
+    unsigned long sp;
+    unsigned short ss;
+    unsigned short __ssh;
+};
+    \end{lstlisting}
+
+    Номера системных вызовов описаны в исходном коде линукса \cite{linux-nomer-syscall}.
+    Зная их и начальный адрес таблицы можно получить и запомнить 
+    абсолютные адреса оригинальных системных вызовов.
+    После чего изменить их на функции обёртки (листинг \ref{lst:syscall-hooking:init}).
+
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:init, caption=Модификация таблицы системных вызовов]
+/* Получение адресов оригинальных системных вызовов */
+orig_open   = (syscall_t)__sys_call_table[__NR_open];
+orig_close  = (syscall_t)__sys_call_table[__NR_close];
+orig_read   = (syscall_t)__sys_call_table[__NR_read];
+orig_write  = (syscall_t)__sys_call_table[__NR_write];
+
+/* Для модификации системной таблицы необходимо снять со страницы защиту от записи */
+unprotect_memory();
+
+/* Замена системных функций hooks */
+__sys_call_table[__NR_open]     = (unsigned long)hook_open;
+__sys_call_table[__NR_close]    = (unsigned long)hook_close;
+__sys_call_table[__NR_read]     = (unsigned long)hook_read;
+__sys_call_table[__NR_write]    = (unsigned long)hook_write;
+
+/* Восстановить защиту от записи */
+protect_memory();
+    \end{lstlisting}
+    
+    Восстановление системных вызовов происходит аналогично перехвату,
+    только в таблицу записываются изначальные адреса обработчиков (\ref{lst:syscall-hooking:exit}).
+
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:exit, caption=Восстановление таблицы системных вызовов]
+/* Восстановление системной таблицы */
+unprotect_memory();
+__sys_call_table[__NR_open]     = (unsigned long)orig_open;
+__sys_call_table[__NR_close]    = (unsigned long)orig_close;
+__sys_call_table[__NR_read]     = (unsigned long)orig_read;
+__sys_call_table[__NR_write]    = (unsigned long)orig_write;
+protect_memory();
+    \end{lstlisting}
+
+    \subsection{Перехват функций через ftrace}
+        В листинге \ref{lst:ftrace-hooking:struct} представлена структура struct ftrace\_hook,
+        которая описывает каждую перехватываемую функцию. 
+        Необходимо заполнить только первые три поля: 
+        имя, адрес функции-обертки и оригинальной функции.
+        Остальные поля считаются деталью реализации. 
+        Для повышения компактности кода рекомендуется использовать
+        макросы представленные в листинге \ref{lst:ftrace-hooking:macro}.
     
         \begin{lstlisting}[language=C, label=lst:ftrace-hooking:struct, caption=Структура перехватываемой функции]
 struct ftrace_hook {
@@ -26,26 +169,156 @@ struct ftrace_hook {
     void *function;   // адрес функции-обертки
     void *original;   // адрес оригинальной функции
 
+    unsigned long address;
     struct ftrace_ops ops;
 };
         \end{lstlisting}
 
-        \begin{lstlisting}[language=C, label=lst:ftrace-hooking:struct, caption=Макрос для заполнения структуры перехватываемой функции]
+        \begin{lstlisting}[language=C, label=lst:ftrace-hooking:macro, caption=Макрос для заполнения структуры перехватываемой функции]
 #define HOOK(_name, _hook, _orig)   \
 {                            \
     .name = (_name),         \
     .function = (_hook),     \
     .original = (_orig),     \
 }
+
+/* массив перехватываемых функций */
+static struct ftrace_hook hooks[] = {
+    HOOK(<func name>, <hook func>, <original func>)
+};
         \end{lstlisting}
 
-\section{Связь структур}
-    Получение по файловому дескриптору имени файла.
-    % current->files->fdt->fd[fd]->f_path.dentry->d_iname
+        Для трассировки функции ядра с помощью ftrace
+        необходимо сначала найти и сохранить её адрес.
+        Аналогично поиску адреса системной таблицы
+        для поиска адреса функции можно использовать функцию kallsyms (листинг \ref{lst:ftrace-hooking:resolve_hook_address}).
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:resolve_hook_address, caption=Поиск адреса функции по символьному имени]
+/* ftrace.h */
+#define MCOUNT_INSN_SIZE	4 /* sizeof mcount call */
+
+#define USE_FENTRY_OFFSET 0
+#if !USE_FENTRY_OFFSET
+#pragma GCC optimize("-fno-optimize-sibling-calls")
+#endif
+
+static int fh_resolve_hook_address(struct ftrace_hook *hook)
+{
+    hook->address = kallsyms_lookup_name(hook->name);
+
+    if (!hook->address)
+    {
+        printk(KERN_DEBUG "unresolved symbol: %s\n", hook->name);
+        return -ENOENT;
+    }
+
+#if USE_FENTRY_OFFSET
+    *((unsigned long*) hook->original) = hook->address + MCOUNT_INSN_SIZE;
+#else
+    *((unsigned long*) hook->original) = hook->address;
+#endif
+    return 0;
+}
+    \end{lstlisting}
+
+    Недостатком ftrace является возможность бесконечной рекурсии при перехвате функции,
+    в результате чего может произойти паника системы.
+    Существуют два способа избежать этого:
+    \begin{enumerate}
+        \item обнаружить рекурсию, посмотрев на адрес возврата функции;
+        \item перепрыгнуть через вызов ftrace (+ MCOUNT\_INSN\_SIZE).
+    \end{enumerate}
+    Для переключения между этими методами существует флаг USE\_FENTRY\_OFFSET.
+    Если установлено значение 0, используется первый вариант, в противном случае -- второй.
+
+    Если используется первый вариант, то необходимо отключить защиту, которую предоставляет ftrace.
+    Она работает на сохранение регистров возврата rip, но он будет изменён нами,
+    поэтому следует реализовать собственные средства защиты.
+    Все сводится к тому, что в .original поле ftrace\_hook структуры 
+    устанавливается адрес памяти системного вызова, указанного в .name.
+    Для корректной работы необходимо указать следующие флаги:
+    \begin{enumerate}
+        \item FTRACE\_OPS\_FL\_IP\_MODIFY информирует ftrace, что регистр rip может быть изменён;
+        \item FTRACE\_OPS\_FL\_SAVE\_REGS передавать struct pt\_regs исходного системного вызова хуку 
+            (необходим для установки FTRACE\_OPS\_FL\_IP\_MODIFY);
+        \item FTRACE\_OPS\_FL\_RECURSION\_SAFE отключает встроенную защиту от рекурсий.
+    \end{enumerate}
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:fh_ftrace_thunk, caption=Защита от рекурсии.]
+static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip, struct ftrace_ops *ops, struct pt_regs *regs)
+{
+    struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
+
+#if USE_FENTRY_OFFSET
+    /* рекурсия не возникнет, т.к. с помощью смещения в оригинальной функции был пропущен вызов ftrace  */
+    regs->ip = (unsigned long) hook->function;
+#else
+    /* проверка адреса возврата функции */
+    if(!within_module(parent_ip, THIS_MODULE))
+        regs->ip = (unsigned long) hook->function;
+#endif
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:install_hook, caption=Установка перехвата функции]
+int fh_install_hook(struct ftrace_hook *hook)
+{
+    int err;
+    err = fh_resolve_hook_address(hook);
+    if(err)
+        return err;
+
+    hook->ops.func = fh_ftrace_thunk;
+    hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
+            | FTRACE_OPS_FL_RECURSION_SAFE
+            | FTRACE_OPS_FL_IPMODIFY;
+
+    /* вызывать fh_ftrace_thunk только тогда когда rip == hook->address */
+    err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
+    if(err)
+    {
+        printk(KERN_DEBUG "ftrace_set_filter_ip() failed: %d\n", err);
+        return err;
+    }
+
+    /* регистрация перехвата */
+    err = register_ftrace_function(&hook->ops);
+    if(err)
+    {
+        printk(KERN_DEBUG "register_ftrace_function() failed: %d\n", err);
+        return err;
+    }
+
+    return 0;
+}
+    \end{lstlisting}
+
+    При выгрузке модуля отключение перехватов происходит в обратном порядке (Листинг \ref{lst:ftrace-hooking:remove_hook}).
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:remove_hook, caption=Отключение перехвата функции]
+void fh_remove_hook(struct ftrace_hook *hook)
+{
+    int err;
+    err = unregister_ftrace_function(&hook->ops);
+    if(err)
+    {
+        printk(KERN_DEBUG "unregister_ftrace_function() failed: %d\n", err);
+    }
+
+    err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+    if(err)
+    {
+        printk(KERN_DEBUG "ftrace_set_filter_ip() failed: %d\n", err);
+    }
+}
+    \end{lstlisting}
+
+% \section{Связь структур}
+%     Получение по файловому дескриптору имени файла.
+%     % current->files->fdt->fd[fd]->f_path.dentry->d_iname
 
 \section{Вывод}
-    В данном разделе была рассмотрена общая архитектура приложения, 
-    алгоритмы перехвата функций и 
-    способ получения имени файла по файловому дескриптору.
+    В данном разделе была рассмотрена общая архитектура приложения и
+    методы перехвата функций с помощью таблицы системных вызовов и ftrace.
 
 \pagebreak
