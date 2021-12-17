@@ -14,3 +14,9 @@ m:
 u:
 	sudo rmmod kernel_monitor.ko
 	dmesg
+
+a:
+	sudo dmesg -C
+	sudo insmod kernel_monitor.ko
+	sudo rmmod kernel_monitor.ko
+	dmesg
