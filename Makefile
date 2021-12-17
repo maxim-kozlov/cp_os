@@ -18,5 +18,6 @@ u:
 a:
 	sudo dmesg -C
 	sudo insmod kernel_monitor.ko
-	sudo rmmod kernel_monitor.ko
-	dmesg
+	-cd test-program; ./$(program).out
+	-sudo rmmod kernel_monitor.ko
+	dmesg | grep $(program).out

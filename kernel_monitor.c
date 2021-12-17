@@ -15,6 +15,8 @@
 #include <linux/path.h>
 #include <linux/dcache.h>
 
+#include <linux/timekeeping32.h>
+
 /*
  * open.c
  */
@@ -103,12 +105,14 @@ asmlinkage int hook_read(const struct pt_regs *regs)
     unsigned int fd = (unsigned int)regs->di;
     char __user *buf = (char*)regs->si;
     size_t count = (size_t)regs->dx;
-
+    
     /* Не логировать стандартный ввод/вывод, а так же системные процессы */
     if (fd > 2 && current->real_parent->pid > 3)
-        printk(KERN_INFO KERNEL_MONITOR "Process %d; read fd: %d; buf: %p; count: %ld; filename: %s\n", current->pid, fd, buf, count,
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; read fd: %d; buf: %p; count: %ld; filename: %s;\n", 
+            current->pid, fd, buf, count,
             current->files->fdt->fd[fd]->f_path.dentry->d_iname);
-    return orig_read(regs);
+
+    return orig_read(regs);;
 }
 
 syscall_t orig_write;
@@ -125,31 +129,40 @@ asmlinkage int hook_write(const struct pt_regs *regs)
     return orig_write(regs);
 }
 
-/*
-int bdev_read_page(struct block_device *bdev, sector_t sector, struct page *page)
-int bdev_write_page(struct block_device *bdev, sector_t sector, struct page *page, struct writeback_control *wbc) 
-static ssize_t random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
-*/
-
 static asmlinkage struct file* (*orig_do_filp_open)(int dfd, struct filename *pathname, const struct open_flags *op);
 static asmlinkage struct file* hook_do_filp_open(int dfd, struct filename *pathname, const struct open_flags *op)
 {
     if (current->real_parent->pid > 3)
         printk(KERN_INFO KERNEL_MONITOR "Process %d; open %s;\n", current->pid, pathname->name);
-    // const char __user *filename = (char *)regs->di;
-    // int flags = (int)regs->si;
-    // umode_t mode = (umode_t)regs->dx;
-
-    // char kernel_filename[NAME_MAX] = {0};
-
-    // long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
 
     struct file* file;
     file = orig_do_filp_open(dfd, pathname, op);
 
-    // if (current->real_parent->pid > 3)
-    //      printk(KERN_INFO KERNEL_MONITOR "H Process %d; open: , flags: %x; mode: %x; fd: %d\n", current->pid, flags, mode, fd);
     return file;
+}
+
+static asmlinkage int (*orig_get_unused_fd_flags)(unsigned flags);
+static asmlinkage int hook_get_unused_fd_flags(unsigned flags)
+{
+    int fd;
+    fd = orig_get_unused_fd_flags(flags);
+
+    if (current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; get_unused_fd %d;\n", current->pid, fd);
+
+    return fd;
+}
+
+static asmlinkage int (*orig_filp_close)(struct file *filp, fl_owner_t id);
+static asmlinkage int hook_filp_close(struct file *filp, fl_owner_t id)
+{
+    int ret;
+    ret = orig_filp_close(filp, id);
+
+    if (current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; filp_close %s; ret: %d\n", current->pid, filp->f_path.dentry->d_iname, ret);
+
+    return ret;
 }
 
 static asmlinkage int (*orig_bdev_read_page)(struct block_device *bdev, sector_t sector, struct page *page);
@@ -208,22 +221,22 @@ static asmlinkage ssize_t hook_urandom_read(struct file *file, char __user *buf,
     return bytes_read;
 }
 
-/* We are going to use the fh_install_hooks() function from ftrace_helper.h
- * in the module initialization function. This function takes an array of 
- * ftrace_hook structs, so we initialize it with what we want to hook
- * */
 static struct ftrace_hook hooks[] = 
 {
     HOOK("random_read", hook_random_read, &orig_random_read),
     HOOK("urandom_read", hook_urandom_read, &orig_urandom_read),
     HOOK("bdev_read_page", hook_bdev_read_page, &orig_bdev_read_page),
     HOOK("bdev_write_page", hook_bdev_write_page, &orig_bdev_write_page),
-    HOOK("do_filp_open", hook_do_filp_open, &orig_do_filp_open)
+    HOOK("do_filp_open", hook_do_filp_open, &orig_do_filp_open),
+    // HOOK("get_unused_fd_flags", hook_get_unused_fd_flags, &orig_get_unused_fd_flags),
+    // HOOK("filp_close", hook_filp_close, &orig_filp_close)
 };
 
 /* Функция инициализации модуля */
 static int __init kernel_monitor_init(void)
 {
+    unsigned long prev_nsec = ktime_get_ns();
+
     /* Поиск начального адреса таблицы системных вызовов */
     __sys_call_table = kallsyms_lookup_name("sys_call_table");
     if (!__sys_call_table)
@@ -258,9 +271,9 @@ static int __init kernel_monitor_init(void)
     unprotect_memory();
 
     /* Замена системных функций hooks*/
-    __sys_call_table[__NR_mkdir]    = (unsigned long)hook_mkdir;
+    // __sys_call_table[__NR_mkdir]    = (unsigned long)hook_mkdir;
 
-    // __sys_call_table[__NR_open]     = (unsigned long)hook_open;
+    __sys_call_table[__NR_open]     = (unsigned long)hook_open;
     __sys_call_table[__NR_close]    = (unsigned long)hook_close;
     __sys_call_table[__NR_read]     = (unsigned long)hook_read;
     __sys_call_table[__NR_write]    = (unsigned long)hook_write;
@@ -268,6 +281,8 @@ static int __init kernel_monitor_init(void)
     /* Восстановить защиту от записи */
     protect_memory();
 
+    unsigned long cur_nsec = ktime_get_ns();
+    printk(KERN_INFO KERNEL_MONITOR "module loaded (%d ns)\n", cur_nsec - prev_nsec);
     return 0;
 }
 
