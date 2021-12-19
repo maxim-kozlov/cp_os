@@ -1,4 +1,414 @@
-\chapter{Диаграмма }
+\chapter{Исходный код программы}
 \label{chapter:appendix:1}
+
+\begin{lstlisting}[language=C, label=lst:makefile, caption=Makefile для сбоки загружаемого модуля ядра.]
+obj-m += kernel_monitor.o
+moduleko-objs := kernel_monitor.o
+
+all:
+    make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+
+clean:
+    make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+
+test:
+	sudo dmesg -C
+	sudo insmod kernel_monitor.ko
+	-cd test-program; ./$(program).out
+	-sudo rmmod kernel_monitor.ko
+	dmesg | grep $(program).out
+\end{lstlisting}
+
+\begin{lstlisting}[language=C, label=lst:syscall_hooks_h, caption=syscall\_hooks.h.]
+#ifndef HOOKS_H
+#define HOOKS_H
+#include <linux/syscalls.h>
+
+typedef asmlinkage long ( *syscall_t)(const struct pt_regs *);
+
+#define CR0_WP 0x00010000
+
+extern unsigned long __force_order;
+inline void cr0_write(unsigned long cr0)
+{
+    // mov cr0, rax
+    asm volatile("mov %0, %%cr0" : "+r"(cr0), "+m"(__force_order));
+}
+
+static inline void protect_memory(void)
+{
+    unsigned long cr0 = read_cr0();
+    cr0_write(cr0 | CR0_WP);
+}
+
+static inline void unprotect_memory(void)
+{
+    unsigned long cr0 = read_cr0();
+    cr0_write(cr0 & ~CR0_WP);
+}
+
+#endif // HOOKS_H
+\end{lstlisting}
+
+\begin{lstlisting}[language=C, label=lst:ftrace_helper_h, caption=ftrace\_helper.h.]
+#include <linux/ftrace.h>
+#include <linux/linkage.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/version.h>
+
+#define HOOK(_name, _hook, _orig)   \
+{                   \
+    .name = (_name),        \
+    .function = (_hook),        \
+    .original = (_orig),        \
+}
+
+#define USE_FENTRY_OFFSET 0
+#if !USE_FENTRY_OFFSET
+#pragma GCC optimize("-fno-optimize-sibling-calls")
+#endif
+
+struct ftrace_hook {
+    const char *name;
+    void *function;
+    void *original;
+
+    unsigned long address;
+    struct ftrace_ops ops;
+};
+
+static int fh_resolve_hook_address(struct ftrace_hook *hook)
+{
+    hook->address = kallsyms_lookup_name(hook->name);
+
+    if (!hook->address)
+    {
+        printk(KERN_DEBUG "unresolved symbol: %s\n", hook->name);
+        return -ENOENT;
+    }
+
+#if USE_FENTRY_OFFSET
+    *((unsigned long*) hook->original) = hook->address + MCOUNT_INSN_SIZE;
+#else
+    *((unsigned long*) hook->original) = hook->address;
+#endif
+
+    return 0;
+}
+
+static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip, struct ftrace_ops *ops, struct pt_regs *regs)
+{
+    struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
+
+#if USE_FENTRY_OFFSET
+    regs->ip = (unsigned long) hook->function;
+#else
+    if(!within_module(parent_ip, THIS_MODULE))
+        regs->ip = (unsigned long) hook->function;
+#endif
+}
+
+int fh_install_hook(struct ftrace_hook *hook)
+{
+    int err;
+    err = fh_resolve_hook_address(hook);
+    if(err)
+        return err;
+
+    hook->ops.func = fh_ftrace_thunk;
+    hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
+            | FTRACE_OPS_FL_RECURSION_SAFE
+            | FTRACE_OPS_FL_IPMODIFY;
+
+    err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
+    if(err)
+    {
+        printk(KERN_DEBUG "ftrace_set_filter_ip() failed: %d\n", err);
+        return err;
+    }
+
+    err = register_ftrace_function(&hook->ops);
+    if(err)
+    {
+        printk(KERN_DEBUG "register_ftrace_function() failed: %d\n", err);
+        return err;
+    }
+
+    return 0;
+}
+
+void fh_remove_hook(struct ftrace_hook *hook)
+{
+    int err;
+    err = unregister_ftrace_function(&hook->ops);
+    if(err)
+    {
+        printk(KERN_DEBUG "rootkit: unregister_ftrace_function() failed: %d\n", err);
+    }
+
+    err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+    if(err)
+    {
+        printk(KERN_DEBUG "rootkit: ftrace_set_filter_ip() failed: %d\n", err);
+    }
+}
+
+int fh_install_hooks(struct ftrace_hook *hooks, size_t count)
+{
+    int err;
+    size_t i;
+
+    for (i = 0 ; i < count ; i++)
+    {
+        err = fh_install_hook(&hooks[i]);
+        if(err)
+        {
+            fh_remove_hooks(hooks, i);
+            return err;
+        }
+    }
+    return 0;
+}
+
+void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
+{
+    size_t i;
+    for (i = 0 ; i < count ; i++)
+        fh_remove_hook(&hooks[i]);
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=C, label=lst:kernel_monitor_c, caption=kernel\_monitor.c.]
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/syscalls.h>
+#include <linux/kallsyms.h>
+#include <linux/namei.h>
+
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/syscalls.h>
+#include <linux/kallsyms.h>
+
+#include <linux/sched.h>
+#include <linux/fdtable.h>
+#include <linux/path.h>
+#include <linux/dcache.h>
+
+/* open.c */
+struct open_flags {
+    int open_flag;
+    umode_t mode;
+    int acc_mode;
+    int intent;
+    int lookup_flags;
+};
+
+#include "syscall_hooks.h"
+#include "ftrace_helper.h"
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Kozlov M.A.");
+MODULE_DESCRIPTION("Kernel monitoring");
+MODULE_VERSION("0.1");
+
+/* Адрес таблицы системных вызовов */
+static unsigned long * __sys_call_table;
+
+/* Префикс лога */
+#define KERNEL_MONITOR "[KERNEL_MONITOR]: "
+
+syscall_t orig_open;
+asmlinkage int hook_open(const struct pt_regs *regs)
+{
+    printk(KERN_INFO KERNEL_MONITOR "Process %d; open\n", current->pid);
+    const char __user *filename = (char *)regs->di;
+    int flags = (int)regs->si;
+    umode_t mode = (umode_t)regs->dx;
+
+    char kernel_filename[NAME_MAX] = {0};
+
+    /* копировать имя файла из пр-ва пользователя в пр-во ядра */
+    long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
+
+    int fd = orig_open(regs);
+        
+    if (!error && current->real_parent->pid > 3)
+            printk(KERN_INFO KERNEL_MONITOR "Process %d; open: %s, flags: %x; mode: %x; fd: %d\n", current->pid, kernel_filename, flags, mode, fd);
+
+    return fd;
+}
+
+syscall_t orig_close;
+asmlinkage int hook_close(const struct pt_regs *regs)
+{
+    unsigned int fd = (unsigned int)regs->di;
+
+    /* Не логировать закрытие stdin, stdout, stderr */
+    if (fd > 2 && current->real_parent->pid > 3)
+    {
+        /* Open file information: */
+        // current->files
+
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; close fd: %d; filename: %s\n", current->pid, fd, 
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
+    }
+    return orig_close(regs);
+}
+
+syscall_t orig_read;
+asmlinkage int hook_read(const struct pt_regs *regs)
+{
+    unsigned int fd = (unsigned int)regs->di;
+    char __user *buf = (char*)regs->si;
+    size_t count = (size_t)regs->dx;
+
+    /* Не логировать стандартный ввод/вывод, а так же системные процессы */
+    if (fd > 2 && current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; read fd: %d; buf: %p; count: %ld; filename: %s\n", current->pid, fd, buf, count,
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
+    return orig_read(regs);
+}
+
+syscall_t orig_write;
+asmlinkage int hook_write(const struct pt_regs *regs)
+{
+    unsigned int fd = (unsigned int)regs->di;
+    const char __user *buf = (const char*)regs->si;
+    size_t count = (size_t)regs->dx;
+
+    /* Не логировать стандартный ввод/вывод, а так же системные процессы */
+    if (fd > 2 && current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; write fd: %d; buf: %p; count: %ld; filename: %s\n", current->pid, fd, buf, count,
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
+    return orig_write(regs);
+}
+
+static asmlinkage struct file* ( *orig_do_filp_open)(int dfd, struct filename *pathname, const struct open_flags *op);
+static asmlinkage struct file* hook_do_filp_open(int dfd, struct filename *pathname, const struct open_flags *op)
+{
+    if (current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; open %s;\n", current->pid, pathname->name);
+
+    struct file* file;
+    file = orig_do_filp_open(dfd, pathname, op);
+    return file;
+}
+
+static asmlinkage int ( *orig_bdev_read_page)(struct block_device *bdev, sector_t sector, struct page *page);
+static asmlinkage int hook_bdev_read_page(struct block_device *bdev, sector_t sector, struct page *page)
+{
+    int err;
+    err = orig_bdev_read_page(bdev, sector, page);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d bdev_read_page; dev: %d\n", current->pid, bdev->bd_dev);
+    return err;
+}
+
+static asmlinkage int ( *orig_bdev_write_page)(struct block_device *bdev, sector_t sector, struct page *page, struct writeback_control *wbc);
+static asmlinkage int hook_bdev_write_page(struct block_device *bdev, sector_t sector, struct page *page, struct writeback_control *wbc)
+{
+    int err;
+    err = orig_bdev_write_page(bdev, sector, page, wbc);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d bdev_write_page; dev: %d\n", current->pid, bdev->bd_dev);
+    return err;
+}
+
+static asmlinkage ssize_t ( *orig_random_read)(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos);
+static asmlinkage ssize_t hook_random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
+{
+    /* Вызов оригинального random_read() */
+    int bytes_read;
+    bytes_read = orig_random_read(file, buf, nbytes, ppos);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d read %d bytes from /dev/random\n", current->pid, bytes_read);
+    return bytes_read;
+}
+
+static asmlinkage ssize_t ( *orig_urandom_read)(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos);
+static asmlinkage ssize_t hook_urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
+{
+    /* Вызов оригинального urandom_read() */
+    int bytes_read;
+    bytes_read = orig_urandom_read(file, buf, nbytes, ppos);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d read %d bytes from /dev/urandom\n", current->pid, bytes_read);    
+    return bytes_read;
+}
+
+static struct ftrace_hook hooks[] = 
+{
+    HOOK("random_read", hook_random_read, &orig_random_read),
+    HOOK("urandom_read", hook_urandom_read, &orig_urandom_read),
+    HOOK("bdev_read_page", hook_bdev_read_page, &orig_bdev_read_page),
+    HOOK("bdev_write_page", hook_bdev_write_page, &orig_bdev_write_page),
+    HOOK("do_filp_open", hook_do_filp_open, &orig_do_filp_open)
+};
+
+/* Функция инициализации модуля */
+static int __init kernel_monitor_init(void)
+{
+    /* Поиск начального адреса таблицы системных вызовов */
+    __sys_call_table = kallsyms_lookup_name("sys_call_table");
+    if (!__sys_call_table)
+        return -1;
+    
+    int err;
+    /* Установка ftrace hooks */
+    err = fh_install_hooks(hooks, ARRAY_SIZE(hooks));
+    if (err)
+        return err;
+
+    /* Получение адресов оригинальных системных вызовов */
+    orig_mkdir  = (syscall_t)__sys_call_table[__NR_mkdir];
+    
+    orig_open   = (syscall_t)__sys_call_table[__NR_open];
+    orig_close  = (syscall_t)__sys_call_table[__NR_close];
+    orig_read   = (syscall_t)__sys_call_table[__NR_read];
+    orig_write  = (syscall_t)__sys_call_table[__NR_write];
+
+    /* Логгирование адресов системных вызовов */
+    printk(KERN_INFO KERNEL_MONITOR "Loading ...");
+    printk(KERN_DEBUG KERNEL_MONITOR "Found the syscall table at 0x%lx\n", __sys_call_table);
+    printk(KERN_DEBUG KERNEL_MONITOR "mkdir: 0x%lx\n", orig_mkdir);
+    printk(KERN_DEBUG KERNEL_MONITOR "open:  0x%lx\n", orig_open);
+    printk(KERN_DEBUG KERNEL_MONITOR "close: 0x%lx\n", orig_close);
+    printk(KERN_DEBUG KERNEL_MONITOR "read:  0x%lx\n", orig_read);
+    printk(KERN_DEBUG KERNEL_MONITOR "write: 0x%lx\n", orig_write);
+
+    printk(KERN_INFO KERNEL_MONITOR "Hooking syscalls\n");
+    
+    /* Для модификации системной таблицы необходимо снять со страницы защиту от записи */
+    unprotect_memory();
+    __sys_call_table[__NR_open]     = (unsigned long)hook_open;
+    __sys_call_table[__NR_close]    = (unsigned long)hook_close;
+    __sys_call_table[__NR_read]     = (unsigned long)hook_read;
+    __sys_call_table[__NR_write]    = (unsigned long)hook_write;
+    /* Восстановить защиту от записи */
+    protect_memory();
+
+    return 0;
+}
+
+static void __exit kernel_monitor_exit(void)
+{
+    printk(KERN_INFO KERNEL_MONITOR "Restoring syscalls\n");
+
+    /* Удаление hooks ftrace */
+    fh_remove_hooks(hooks, ARRAY_SIZE(hooks));
+
+    /* Восстановление системной таблицы */
+    unprotect_memory();
+    __sys_call_table[__NR_open]     = (unsigned long)orig_open;
+    __sys_call_table[__NR_close]    = (unsigned long)orig_close;
+    __sys_call_table[__NR_read]     = (unsigned long)orig_read;
+    __sys_call_table[__NR_write]    = (unsigned long)orig_write;
+    protect_memory();
+    
+    printk(KERN_INFO KERNEL_MONITOR "Unloaded.\n");
+}
+
+module_init(kernel_monitor_init);
+module_exit(kernel_monitor_exit); 
+\end{lstlisting}
 
 \pagebreak
