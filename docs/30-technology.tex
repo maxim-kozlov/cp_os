@@ -1,0 +1,264 @@
+\chapter{Технологический раздел}
+\section{Выбор языка программирования и среды программирования}
+    Операционная система Linux позволяет писать загружаемые модули ядра на Rust и на C.
+    Для реализации загружаемого модуля был выбран последний, так как
+    большая часть ядра Linux и загружаемых моделей написана на языке C, 
+    а также у меня есть опыт разработки модулей на данном языке программирования.
+    Для сборки загружаемого модуля была выбрана утилита make.
+
+    В качестве среды разработки была выбрана 
+    кроссплатформенная программа Visual Studio Code,
+    разрабатываемая компанией Microsoft.
+    Visual Studio Code содержит редактор кода, отладчик,
+    средства для статического анализа кода и средства для сборки проекта.
+
+\section{Реализация загружаемого модуля ядра}
+    На листинге \ref{lst:makefile} представлен Makefile загружаемого модуля ядра.
+    Кроме непосредственной сборки модуля Makefile содержит цели clean и test,
+    которые позволяют очистить директорию от файлов сборки и протестировать работу модуля
+    программой указанной в переменной program.
+
+    % На листинге \ref{lst:ftrace-hooking:fh_ftrace_thunk} представлена функция защиты  от рекурсии.
+    Как было показано в разделе \ref{design:alg:hook:ftrace}
+    для корректного внедрения функций-перехватчиков с использованием ftrace,
+    был реализован алгоритм защиты от рекурсии, представленный на листинге \ref{lst:ftrace-hooking:fh_ftrace_thunk}.
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:fh_ftrace_thunk, caption=Защита ftrace от рекурсии.]
+static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip, struct ftrace_ops *ops, struct pt_regs *regs)
+{
+    struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
+    /* проверка адреса возврата функции */
+    if(!within_module(parent_ip, THIS_MODULE))
+        regs->ip = (unsigned long) hook->function; // вызов функции-перехватчика
+}
+    \end{lstlisting}
+
+    На листингах \ref{lst:ftrace-hooking:install_hook} и \ref{lst:ftrace-hooking:remove_hook} представлены
+    функции установки и отключения функций перехватчиков с использованием библиотеки ftrace.
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:install_hook, caption=Установка перехвата функции]
+int fh_install_hook(struct ftrace_hook *hook)
+{
+    int err;
+    err = fh_resolve_hook_address(hook);
+    if(err)
+        return err;
+
+    hook->ops.func = fh_ftrace_thunk;
+    hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
+            | FTRACE_OPS_FL_RECURSION_SAFE
+            | FTRACE_OPS_FL_IPMODIFY;
+
+    /* вызывать fh_ftrace_thunk только тогда когда rip == hook->address */
+    err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
+    if(err)
+    {
+        printk(KERN_DEBUG "ftrace_set_filter_ip() failed: %d\n", err);
+        return err;
+    }
+
+    /* регистрация перехвата */
+    err = register_ftrace_function(&hook->ops);
+    if(err)
+    {
+        printk(KERN_DEBUG "register_ftrace_function() failed: %d\n", err);
+        return err;
+    }
+
+    return 0;
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:remove_hook, caption=Отключение перехвата функции]
+void fh_remove_hook(struct ftrace_hook *hook)
+{
+    int err;
+    err = unregister_ftrace_function(&hook->ops);
+    if(err)
+    {
+        printk(KERN_DEBUG "unregister_ftrace_function() failed: %d\n", err);
+    }
+
+    err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+    if(err)
+    {
+        printk(KERN_DEBUG "ftrace_set_filter_ip() failed: %d\n", err);
+    }
+}
+    \end{lstlisting}
+
+    Встроенная в Linux функция write\_cr0() не позволяет изменять бит WP, 
+    поэтому была реализована своя функция, представленная на листинге \ref{lst:syscall-hooking:cr0_write}.
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:cr0_write, caption=Функция изменения значения регистра cr0]
+extern unsigned long __force_order;
+inline void cr0_write(unsigned long cr0)
+{
+// mov cr0, rax
+asm volatile("mov %0, %%cr0" : "+r"(cr0), "+m"(__force_order));
+}
+    \end{lstlisting}
+
+    На листинге \ref{lst:syscall_table-hooking:install_hook} представлена часть кода,
+    внедряющая функции перехватчики в таблицу системных вызовов.
+    \begin{lstlisting}[language=C, label=lst:syscall_table-hooking:install_hook, caption=Внедрение функций перехватчиков в таблицу системных вызовов]
+#define CR0_WP 0x00010000
+
+/* Поиск начального адреса таблицы системных вызовов */
+__sys_call_table = kallsyms_lookup_name("sys_call_table");
+if (!__sys_call_table)
+    return -1;
+
+/* Получение адресов оригинальных системных вызовов */
+orig_open   = (syscall_t)__sys_call_table[__NR_open];
+orig_close  = (syscall_t)__sys_call_table[__NR_close];
+orig_read   = (syscall_t)__sys_call_table[__NR_read];
+orig_write  = (syscall_t)__sys_call_table[__NR_write];
+
+/* Снятие защиту от записи */
+unsigned long cr0 = read_cr0();
+cr0_write(cr0 & ~CR0_WP);
+
+/* Замена системных функций hooks*/
+// __sys_call_table[__NR_mkdir]    = (unsigned long)hook_mkdir;
+
+__sys_call_table[__NR_open]     = (unsigned long)hook_open;
+__sys_call_table[__NR_close]    = (unsigned long)hook_close;
+__sys_call_table[__NR_read]     = (unsigned long)hook_read;
+__sys_call_table[__NR_write]    = (unsigned long)hook_write;
+
+/* Восстановление защиты от записи */
+cr0 = read_cr0();
+cr0_write(cr0 | CR0_WP);
+    \end{lstlisting}
+        
+
+    На листингах \ref{lst:syscall-hooking:open}-\ref{lst:ftrace-hooking:bdev_write_page} 
+    представлены реализации алгоритма из рисунка \ref{schema:syscall:hook:alg} 
+    для каждой функции перехватчика системных вызовов:
+    open, close, read, write через таблицу системных вызовов,
+    а random\_read, do\_filp\_open, bdev\_read\_page, bdev\_write\_page через ftrace соответственно.
+
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:open, caption=Функция-обёртка системного вызова open]
+syscall_t orig_open;
+asmlinkage int hook_open(const struct pt_regs *regs)
+{
+    const char __user *filename = (char *)regs->di;
+    int flags = (int)regs->si;
+    umode_t mode = (umode_t)regs->dx;
+
+    char kernel_filename[NAME_MAX] = {0};
+
+    long error = strncpy_from_user(kernel_filename, filename, NAME_MAX);
+
+    int fd = orig_open(regs);
+        
+    if (!error && current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; open: %s, flags: %x; mode: %x; fd: %d\n", current->pid, kernel_filename, flags, mode, fd);
+
+    return fd;
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:close, caption=Функция-обёртка системного вызова close]
+syscall_t orig_close;
+asmlinkage int hook_close(const struct pt_regs *regs)
+{
+    unsigned int fd = (unsigned int)regs->di;
+
+    /* Не логировать стандартный ввод/вывод, а так же системные процессы */
+    if (fd > 2 && current->real_parent->pid > 3)
+    {        
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; close fd: %d; filename: %s\n", current->pid, fd, 
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
+    }
+    return orig_close(regs);
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:read, caption=Функция-обёртка системного вызова read]
+syscall_t orig_read;
+asmlinkage int hook_read(const struct pt_regs *regs)
+{
+    unsigned int fd = (unsigned int)regs->di;
+    char __user *buf = (char*)regs->si;
+    size_t count = (size_t)regs->dx;
+
+    /* Не логировать стандартный ввод/вывод, а так же системные процессы */
+    if (fd > 2 && current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; read fd: %d; buf: %p; count: %ld; filename: %s\n", current->pid, fd, buf, count,
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
+    return orig_read(regs);
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:syscall-hooking:write, caption=Функция-обёртка системного вызова write]
+syscall_t orig_write;
+asmlinkage int hook_write(const struct pt_regs *regs)
+{
+    unsigned int fd = (unsigned int)regs->di;
+    const char __user *buf = (const char*)regs->si;
+    size_t count = (size_t)regs->dx;
+
+    /* Не логировать стандартный ввод/вывод, а так же системные процессы */
+    if (fd > 2 && current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; write fd: %d; buf: %p; count: %ld; filename: %s\n", current->pid, fd, buf, count,
+            current->files->fdt->fd[fd]->f_path.dentry->d_iname);
+    return orig_write(regs);
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:random_read, caption=Функция-обёртка функции random\_read]
+static asmlinkage ssize_t ( *orig_random_read)(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos);
+static asmlinkage ssize_t hook_random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
+{
+    /* Вызов оригинального random_read() */
+    int bytes_read;
+    bytes_read = orig_random_read(file, buf, nbytes, ppos);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d read %d bytes from /dev/random\n", current->pid, bytes_read);
+    return bytes_read;
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:do_filp_open, caption=Функция-обёртка функции do\_filp\_open]
+static asmlinkage struct file* ( *orig_do_filp_open)(int dfd, struct filename *pathname, const struct open_flags *op);
+static asmlinkage struct file* hook_do_filp_open(int dfd, struct filename *pathname, const struct open_flags *op)
+{
+    if (current->real_parent->pid > 3)
+        printk(KERN_INFO KERNEL_MONITOR "Process %d; open %s;\n", current->pid, pathname->name);
+    
+    struct file* file;
+    file = orig_do_filp_open(dfd, pathname, op);
+
+    return file;
+}
+    \end{lstlisting}
+
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:bdev_read_page, caption=Функция-обёртка функции bdev\_read\_page]
+static asmlinkage int ( *orig_bdev_read_page)(struct block_device *bdev, sector_t sector, struct page *page);
+static asmlinkage int hook_bdev_read_page(struct block_device *bdev, sector_t sector, struct page *page)
+{
+    int err;
+    err = orig_bdev_read_page(bdev, sector, page);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d bdev_read_page; dev: %d\n", current->pid, bdev->bd_dev);
+    return err;
+}
+    \end{lstlisting}
+
+    \begin{lstlisting}[language=C, label=lst:ftrace-hooking:bdev_write_page, caption=Функция-обёртка функции bdev\_write\_page]
+static asmlinkage int ( *orig_bdev_write_page)(struct block_device *bdev, sector_t sector, struct page *page, struct writeback_control *wbc);
+static asmlinkage int hook_bdev_write_page(struct block_device *bdev, sector_t sector, struct page *page, struct writeback_control *wbc)
+{
+    int err;
+    err = orig_bdev_write_page(bdev, sector, page, wbc);
+    printk(KERN_INFO KERNEL_MONITOR "Process %d bdev_write_page; dev: %d\n", current->pid, bdev->bd_dev);
+    return err;
+}
+    \end{lstlisting}
+
+% \section{Выводы}
+%     В результате разработки загружаемого модуля ядра
+%     получено программное обеспечение позволяющее осуществлять 
+%     мониторинг системных вызовов в соответствии с заданием на курсовую работу.
+
+\pagebreak
